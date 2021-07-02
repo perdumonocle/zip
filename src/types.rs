@@ -30,7 +30,7 @@ impl System {
 /// # Warning
 ///
 /// Some utilities use alternative timestamps to improve the accuracy of their
-/// ZIPs, but we don't parse them yet. [We're working on this](https://github.com/zip-rs/zip/issues/156#issuecomment-652981904),
+/// ZIPs, but we don't parse them yet. [We're working on this](https://github.com/mvdnes/zip-rs/issues/156#issuecomment-652981904),
 /// however this API shouldn't be considered complete.
 #[derive(Debug, Clone, Copy)]
 pub struct DateTime {
@@ -216,8 +216,6 @@ pub struct ZipFileData {
     pub version_made_by: u8,
     /// True if the file is encrypted.
     pub encrypted: bool,
-    /// True if the file uses a data-descriptor section
-    pub using_data_descriptor: bool,
     /// Compression method used to store the file
     pub compression_method: crate::compression::CompressionMethod,
     /// Last modified time. This will only have a 2 second precision.
@@ -232,8 +230,6 @@ pub struct ZipFileData {
     pub file_name: String,
     /// Raw file name. To be used when file_name was incorrectly decoded.
     pub file_name_raw: Vec<u8>,
-    /// Extra field usually used for storage expansion
-    pub extra_field: Vec<u8>,
     /// File comment
     pub file_comment: String,
     /// Specifies where the local header of the file starts
@@ -246,8 +242,8 @@ pub struct ZipFileData {
     pub data_start: u64,
     /// External file attributes
     pub external_attributes: u32,
-    /// Reserve local ZIP64 extra field
-    pub large_file: bool,
+    /// AES mode if applicable
+    pub aes_mode: Option<(AesMode, AesVendorVersion)>,
 }
 
 impl ZipFileData {
@@ -271,29 +267,51 @@ impl ZipFileData {
 
         ::std::path::Path::new(&filename)
             .components()
-            .filter(|component| match *component {
-                ::std::path::Component::Normal(..) => true,
-                _ => false,
-            })
+            .filter(|component| matches!(*component, ::std::path::Component::Normal(..)))
             .fold(::std::path::PathBuf::new(), |mut path, ref cur| {
                 path.push(cur.as_os_str());
                 path
             })
     }
 
-    pub fn zip64_extension(&self) -> bool {
-        self.uncompressed_size > 0xFFFFFFFF
-            || self.compressed_size > 0xFFFFFFFF
-            || self.header_start > 0xFFFFFFFF
+    pub fn version_needed(&self) -> u16 {
+        match self.compression_method {
+            #[cfg(feature = "bzip2")]
+            crate::compression::CompressionMethod::Bzip2 => 46,
+            _ => 20,
+        }
+    }
+}
+
+/// The encryption specification used to encrypt a file with AES.
+///
+/// According to the [specification](https://www.winzip.com/win/en/aes_info.html#winzip11) AE-2
+/// does not make use of the CRC check.
+#[derive(Copy, Clone, Debug)]
+pub enum AesVendorVersion {
+    Ae1,
+    Ae2,
+}
+
+/// AES variant used.
+#[derive(Copy, Clone, Debug)]
+pub enum AesMode {
+    Aes128,
+    Aes192,
+    Aes256,
+}
+
+#[cfg(feature = "aes-crypto")]
+impl AesMode {
+    pub fn salt_length(&self) -> usize {
+        self.key_length() / 2
     }
 
-    pub fn version_needed(&self) -> u16 {
-        // higher versions matched first
-        match (self.zip64_extension(), self.compression_method) {
-            #[cfg(feature = "bzip2")]
-            (_, crate::compression::CompressionMethod::Bzip2) => 46,
-            (true, _) => 45,
-            _ => 20,
+    pub fn key_length(&self) -> usize {
+        match self {
+            Self::Aes128 => 16,
+            Self::Aes192 => 24,
+            Self::Aes256 => 32,
         }
     }
 }
@@ -317,7 +335,6 @@ mod test {
             system: System::Dos,
             version_made_by: 0,
             encrypted: false,
-            using_data_descriptor: false,
             compression_method: crate::compression::CompressionMethod::Stored,
             last_modified_time: DateTime::default(),
             crc32: 0,
@@ -325,13 +342,12 @@ mod test {
             uncompressed_size: 0,
             file_name: file_name.clone(),
             file_name_raw: file_name.into_bytes(),
-            extra_field: Vec::new(),
             file_comment: String::new(),
             header_start: 0,
             data_start: 0,
             central_header_start: 0,
             external_attributes: 0,
-            large_file: false,
+            aes_mode: None,
         };
         assert_eq!(
             data.file_name_sanitized(),

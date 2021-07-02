@@ -195,11 +195,12 @@ fn zip64_large() {
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).unwrap();
-        let outpath = file.enclosed_name().unwrap();
+        #[allow(deprecated)]
+        let outpath = file.sanitized_name();
         println!(
             "Entry {} has name \"{}\" ({} bytes)",
             i,
-            outpath.display(),
+            outpath.as_path().display(),
             file.size()
         );
 
